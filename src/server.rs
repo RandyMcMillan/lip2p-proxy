@@ -1,66 +1,216 @@
+use std::collections::{HashMap, HashSet};
+use std::error::Error;
 use std::io;
-use std::task::{Context, Poll};
-use libp2p::core::upgrade::DeniedUpgrade;
-use libp2p::futures::FutureExt;
-use libp2p::swarm::{ConnectionHandler, ConnectionHandlerEvent, ConnectionHandlerUpgrErr, KeepAlive, SubstreamProtocol};
-use libp2p::swarm::handler::{InboundUpgradeSend, OutboundUpgradeSend};
-use ssh_key::PublicKey;
-use void::Void;
-use crate::protocol::{PendingConnection, ProxyServerProtocol};
+use std::net::SocketAddr;
+use std::ops::Sub;
+use libp2p::dns::GenDnsConfig;
+use std::str::FromStr;
+use std::time::{Duration, Instant};
+use async_std::task::block_on;
+use futures::StreamExt;
+use libp2p::kad::{GetClosestPeersError, Kademlia, KademliaConfig, KademliaEvent, QueryResult};
+use libp2p::kad::store::MemoryStore;
+use libp2p_proxy::client::{ProxyClient, ProxyClientEvent};
+use libp2p::{autonat, development_transport, gossipsub, identity, NetworkBehaviour, noise, PeerId, relay, Swarm, Transport};
+use libp2p::core::transport::{OrTransport, upgrade};
+use libp2p::gossipsub::{Gossipsub, GossipsubConfig, GossipsubConfigBuilder, GossipsubEvent, MessageAuthenticity};
+use libp2p::identify::{Identify, IdentifyConfig, IdentifyEvent};
+use libp2p::multiaddr::Protocol;
+use libp2p::ping::{Ping, PingEvent};
+use libp2p::relay::v2::HOP_PROTOCOL_NAME;
+use libp2p::swarm::AddressRecord;
+use libp2p::swarm::dial_opts::DialOpts;
+use libp2p::tcp::GenTcpConfig;
+use libp2p_dns::DnsConfig;
+use libp2p_tcp::TcpTransport;
+use log::{debug, error, info};
+use ssh_key::{PrivateKey, PublicKey};
+use libp2p_proxy::server::ProxyServer;
+use crate::{BOOTNODES, SwarmEvent, Multiaddr};
+use libp2p::gossipsub::TopicHash;
 
-pub struct ProxyServerHandler {
-    key: PublicKey,
-    pending_connections: Vec<PendingConnection>
+
+const MAX_RELAYS: usize = 5;
+const MAX_PEERS: usize = 25;
+
+
+#[derive(NetworkBehaviour)]
+#[behaviour(out_event = "ServerEvent")]
+struct ServerBehaviour {
+    kadmelia: Kademlia<MemoryStore>,
+    identify: Identify,
+    server: ProxyServer,
+    ping: Ping,
+    auto_nat: autonat::Behaviour,
+    relay: relay::v2::client::Client,
 }
 
-impl ProxyServerHandler {
-    pub fn new(key: PublicKey) -> Self {
-        ProxyServerHandler{
-            key, pending_connections: Vec::new()
-        }
+#[derive(Debug)]
+enum ServerEvent {
+    Server(()),
+    Kadmelia(KademliaEvent),
+    Identify(IdentifyEvent),
+    Ping(PingEvent),
+    AutoNat(autonat::Event),
+    Relay(relay::v2::client::Event),
+}
+
+impl From<KademliaEvent> for ServerEvent {
+    fn from(e: KademliaEvent) -> Self {
+        Self::Kadmelia(e)
     }
 }
 
-impl ConnectionHandler for ProxyServerHandler {
-    type InEvent = ();
-    type OutEvent = ();
-    type Error = io::Error;
-    type InboundProtocol = ProxyServerProtocol;
-    type OutboundProtocol = DeniedUpgrade;
-    type InboundOpenInfo = ();
-    type OutboundOpenInfo = ();
+impl From<()> for ServerEvent {
+    fn from(_: ()) -> Self {
+        Self::Server(())
+    }
+}
 
-    fn listen_protocol(&self) -> SubstreamProtocol<Self::InboundProtocol, Self::InboundOpenInfo> {
-        SubstreamProtocol::new(
-            ProxyServerProtocol {
-                public_key: self.key.clone()
-            }, ()
+impl From<IdentifyEvent> for ServerEvent {
+    fn from(e: IdentifyEvent) -> Self {
+        Self::Identify(e)
+    }
+}
+
+impl From<PingEvent> for ServerEvent {
+    fn from(e: PingEvent) -> Self {
+        Self::Ping(e)
+    }
+}
+
+impl From<autonat::Event> for ServerEvent {
+    fn from(e: autonat::Event) -> Self {
+        Self::AutoNat(e)
+    }
+}
+
+impl From<relay::v2::client::Event> for ServerEvent {
+    fn from(e: relay::v2::client::Event) -> Self {
+        Self::Relay(e)
+    }
+}
+
+pub async fn run_server(key: PublicKey) -> Result<(), Box<dyn Error>> {
+    let local_key = identity::Keypair::generate_ed25519();
+    let local_peer_id = PeerId::from(local_key.public());
+
+    info!("Peer id is {local_peer_id}");
+
+    let (relay_transport, client) = relay::v2::client::Client::new_transport_and_behaviour(local_peer_id);
+
+    let noise_keys = noise::Keypair::<noise::X25519Spec>::new()
+        .into_authentic(&local_key)
+        .expect("Signing libp2p-noise static DH keypair failed.");
+
+    let transport = OrTransport::new(
+        relay_transport,
+        block_on(
+            DnsConfig::system(TcpTransport::new(
+                GenTcpConfig::default().port_reuse(true),
+            )))
+            .unwrap())
+        .upgrade(upgrade::Version::V1)
+        .authenticate(
+            noise::NoiseConfig::xx(noise_keys).into_authenticated()
         )
-    }
+        .multiplex(libp2p::yamux::YamuxConfig::default())
+        .boxed();
 
-    fn inject_fully_negotiated_inbound(&mut self, con: PendingConnection, _: ()) {
-        self.pending_connections.push(con);
-    }
+    let mut swarm = {
+        let mut cfg = KademliaConfig::default();
+        cfg.set_query_timeout(Duration::from_secs(5 * 60));
+        let store = MemoryStore::new(local_peer_id);
+        let mut kadmelia = Kademlia::with_config(local_peer_id, store, cfg);
 
-    fn inject_fully_negotiated_outbound(&mut self, _: Void, _: ()) {}
+        let mut behaviour = ServerBehaviour {
+            server: ProxyServer::new(key),
+            kadmelia,
+            identify: Identify::new(
+                IdentifyConfig::new(
+                    "/ipfs/0.1.0".into(),
+                    local_key.public(),
+                )
+            ),
+            ping: Ping::default(),
+            auto_nat: autonat::Behaviour::new(
+                local_peer_id,
+                autonat::Config {
+                    retry_interval: Duration::from_secs(10),
+                    refresh_interval: Duration::from_secs(30),
+                    boot_delay: Duration::from_secs(5),
+                    throttle_server_period: Duration::ZERO,
+                    ..Default::default()
+                },
+            ),
+            relay: client
+        };
 
-    fn inject_event(&mut self, _: ()) {}
+        let bootaddr = Multiaddr::from_str("/dnsaddr/bootstrap.libp2p.io")?;
 
-    fn inject_dial_upgrade_error(&mut self, _: (), _: ConnectionHandlerUpgrErr<Void>) {}
-
-    fn connection_keep_alive(&self) -> KeepAlive {
-        KeepAlive::Yes
-    }
-
-    fn poll(&mut self, cx: &mut Context<'_>) -> Poll<ConnectionHandlerEvent<Self::OutboundProtocol, Self::OutboundOpenInfo, Self::OutEvent, Self::Error>> {
-        let mut new_con = Vec::new();
-
-        while let Some(mut con) = self.pending_connections.pop() {
-            if let Poll::Pending = con.poll_unpin(cx) {
-                new_con.push(con);
-            }
+        for peer in &BOOTNODES {
+            behaviour.kadmelia.add_address(&PeerId::from_str(peer)?, bootaddr.clone());
         }
-        self.pending_connections = new_con;
-        Poll::Pending
+
+        Swarm::new(transport, behaviour, local_peer_id)
+    };
+
+    swarm.behaviour_mut().kadmelia.bootstrap()?;
+    let mut relays_map = HashMap::new();
+    let mut pending_relay_listeners = HashSet::new();
+
+    loop {
+
+        let event = swarm.select_next_some().await;
+        match event {
+            SwarmEvent::Behaviour(e) => {
+                match e {
+
+                    ServerEvent::Relay(relay::v2::client::Event::ReservationReqAccepted {relay_peer_id, ..}) => {
+                        info!("Reserved address on relay {:#?}", relay_peer_id);
+                    },
+
+                    ServerEvent::Relay(relay::v2::client::Event::ReservationReqFailed {relay_peer_id, error, ..}) => {
+                        info!("Failed to reserve address on relay {:#?}: {:#?}", relay_peer_id, error);
+                    },
+
+                    ServerEvent::Identify(IdentifyEvent::Received {peer_id, info}) => {
+                        if relays_map.len() < MAX_RELAYS
+                            && pending_relay_listeners.len() < MAX_RELAYS
+                            && info.protocols.contains(&String::from_utf8_lossy(HOP_PROTOCOL_NAME).to_string()) {
+                            info!("Trying to set peer {peer_id} as relay");
+                            let addr = Multiaddr::empty()
+                                .with(Protocol::Memory(40))
+                                .with(Protocol::P2p(peer_id.into()))
+                                .with(Protocol::P2pCircuit);
+                            let res = swarm.listen_on(addr);
+                            if let Err(e) = res {
+                                error!("Error while connecting to relay: {:#?}", e);
+                            } else {
+                                pending_relay_listeners.insert(res.unwrap());
+                            }
+                        }
+
+                        if info.protocols.contains(&"/rendezvous/1.0.0".to_string()) {
+                            info!("Found rendezvous point {peer_id}");
+                        }
+                    },
+                    _ => {}
+                };
+            },
+
+            SwarmEvent::NewListenAddr { listener_id, address } => {
+                info!("Listening on {address}");
+                pending_relay_listeners.remove(&listener_id);
+                relays_map.insert(listener_id, address);
+            }
+
+            SwarmEvent::ListenerClosed {listener_id, addresses, ..} => {
+                info!("Stopping listening on {:?}", addresses);
+                relays_map.remove(&listener_id);
+            }
+
+            _ => {}
+        }
     }
 }

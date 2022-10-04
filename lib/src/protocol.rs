@@ -1,3 +1,4 @@
+use std::error::Error;
 use std::io;
 use std::net::{SocketAddr};
 use std::str::FromStr;
@@ -10,7 +11,7 @@ use libp2p::{InboundUpgrade, OutboundUpgrade};
 use libp2p::futures::future::{BoxFuture};
 use libp2p::futures::{AsyncRead, AsyncReadExt, AsyncWrite, FutureExt};
 use libp2p::swarm::{NegotiatedSubstream};
-use ssh_key::{PrivateKey, PublicKey};
+use ssh_key::{Algorithm, HashAlg, PrivateKey, PublicKey};
 use async_std::net::{TcpStream};
 use log::{debug, error, info};
 use async_std::task;
@@ -33,38 +34,29 @@ pub enum ProxyVersion {
     Version1 // 1.0.0
 }
 
-impl ProxyVersion {
-    fn client(&self) -> &[u8] {
+impl ProtocolName for ProxyVersion {
+    fn protocol_name(&self) -> &[u8] {
         match self {
-            ProxyVersion::Version1 => CLIENT_V1_VER
-        }
-    }
-
-    fn server(&self) -> &[u8] {
-        match self {
-            ProxyVersion::Version1 => SERVER_V1_VER
+            ProxyVersion::Version1 => b"/tricker/proxy/1.0.0"
         }
     }
 }
-
-pub const CLIENT_V1_VER: &[u8] = b"/tricker/proxy/1.0.0/client";
-pub const SERVER_V1_VER: &[u8] = b"/tricker/proxy/1.0.0/server";
 
 pub const SUPPORTED_VERSIONS: [ProxyVersion; 1] = [ProxyVersion::Version1];
 
 const OK_BYTE: &[u8] = b"\x01";
 const ERR_BYTE: &[u8] = b"\x00";  // maybe in future add more verbose errors
-const MAX_ADDR_LEN: usize = 128;
+const MAX_ADDR_LEN: usize = 1024;
 
 impl ProtocolName for ProxyClientProtocol {
     fn protocol_name(&self) -> &[u8] {
-        ProxyVersion::Version1.client()
+        ProxyVersion::Version1.protocol_name()
     }
 }
 
 impl ProtocolName for ProxyServerProtocol {
     fn protocol_name(&self) -> &[u8] {
-        ProxyVersion::Version1.server()
+        ProxyVersion::Version1.protocol_name()
     }
 }
 
@@ -74,7 +66,7 @@ impl UpgradeInfo for ProxyClientProtocol {
 
     fn protocol_info(&self) -> Self::InfoIter {
         SUPPORTED_VERSIONS.iter()
-            .map(|v| v.client())
+            .map(|v| v.protocol_name())
             .collect()
 
     }
@@ -86,7 +78,7 @@ impl UpgradeInfo for ProxyServerProtocol {
 
     fn protocol_info(&self) -> Self::InfoIter {
         SUPPORTED_VERSIONS.iter()
-            .map(|v| v.client())
+            .map(|v| v.protocol_name())
             .collect()
 
     }
@@ -216,7 +208,10 @@ async fn read_address<I>(mut stream: I, key: PublicKey) -> io::Result<SocketAddr
                 Err(_) => Err(io::ErrorKind::InvalidData.into())
             }
         }
-        Err(_) => Err(io::ErrorKind::InvalidData.into())
+        Err(err) => {
+            error!("Cannot verify signature: {err}");
+            Err(io::ErrorKind::InvalidData.into())
+        }
     }
 }
 
@@ -273,4 +268,112 @@ where
     debug!("Connection completed successfully");
 
     Ok(())
+}
+
+#[cfg(test)]
+mod test {
+    use std::error::Error;
+    use ssh_key::{Algorithm, PrivateKey, PublicKey};
+    use crate::protocol::{ProxyClientProtocol, read_address, write_address};
+    use std::net::{SocketAddr};
+    use std::str::FromStr;
+    use futures::AsyncReadExt;
+    use async_std::stream::Stream;
+    use libp2p::futures::{AsyncRead, AsyncWrite, FutureExt};
+    use std::task::{Context, Poll};
+    use std::io::{self, Cursor, Read, Write};
+    use std::pin::Pin;
+    use async_std::net::TcpStream;
+
+    #[derive(Default, Debug)]
+    pub struct MockStream {
+        buf: Cursor<Vec<u8>>,
+        from_index: usize,
+    }
+
+    impl Unpin for MockStream {}
+
+    impl MockStream {
+        pub fn from(buf: &[u8]) -> Self {
+            Self {
+                buf: Cursor::new(Vec::from(buf)),
+                from_index: 0,
+            }
+        }
+    }
+
+    impl AsyncRead for MockStream {
+        fn poll_read(
+            mut self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+            buf: &mut [u8],
+        ) -> Poll<io::Result<usize>> {
+            let this: &mut Self = Pin::into_inner(self);
+            this.buf.set_position(this.from_index.clone() as u64);
+            let res = this.buf.read(buf);
+            if let Ok(s) = res {
+                this.from_index += s;
+            }
+            Poll::Ready(res)
+        }
+    }
+
+    impl AsyncWrite for MockStream {
+        fn poll_write(
+            self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+            buf: &[u8],
+        ) -> Poll<io::Result<usize>> {
+            let this: &mut Self = Pin::into_inner(self);
+            Poll::Ready(this.buf.write(buf))
+        }
+
+        fn poll_flush(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+            Poll::Ready(Ok(()))
+        }
+
+        fn poll_close(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+            Poll::Ready(Ok(()))
+        }
+    }
+
+    impl Stream for MockStream {
+        type Item = Result<Vec<u8>, io::Error>;
+        fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+            let this: &mut Self = Pin::into_inner(self);
+            let mut buf = [0u8; 1024];
+            match Pin::new(this).poll_read(cx, &mut buf) {
+                Poll::Pending => Poll::Ready(None),
+                Poll::Ready(Ok(b)) if b == 0 => Poll::Ready(None),
+                Poll::Ready(Ok(b)) => Poll::Ready(Some(Ok(Vec::from(&buf[..b])))),
+                Poll::Ready(Err(e)) => Poll::Ready(Some(Err(e))),
+            }
+        }
+    }
+
+    impl AsRef<[u8]> for MockStream {
+        fn as_ref(&self) -> &[u8] {
+            self.buf.get_ref()
+        }
+    }
+
+    #[async_std::test]
+    async fn test_handshake() -> Result<(), Box<dyn Error>> {
+        let a = SocketAddr::from_str("127.0.0.1:80")?;
+        let (r, w) = MockStream::from(b"").split();
+
+        let key = std::fs::read_to_string("/Users/artolord/.ssh/tricker.pub")?;
+        let key_pub = PublicKey::from_openssh(key.as_str())?;
+
+        let key = std::fs::read_to_string("/Users/artolord/.ssh/tricker")?;
+        let key_priv = PrivateKey::from_openssh(key.as_str())?;
+
+        write_address(w, key_priv, a).await?;
+
+        let addr = read_address(r, key_pub).await?;
+
+        assert_eq!(addr, a);
+
+        Ok(())
+    }
 }

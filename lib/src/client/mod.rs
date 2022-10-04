@@ -1,3 +1,5 @@
+mod handler;
+
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::error::Error;
 use std::io;
@@ -16,10 +18,7 @@ use async_std::task::{JoinHandle, spawn};
 use futures::{select, StreamExt};
 use futures::executor::block_on;
 use log::error;
-use crate::client::{ProxyClientHandler, ProxyInClientEvent, ProxyOutClientEvent};
-
-type Listener = JoinHandle<io::Result<Connection>>;
-type AcceptFeature = JoinHandle<io::Result<SocketAddr>>;
+use handler::{ProxyClientHandler, ProxyInClientEvent, ProxyOutClientEvent};
 
 struct Connection {
     listener: JoinHandle<io::Result<()>>,
@@ -186,15 +185,6 @@ impl EventLoop {
                     peer_id
                 };
                 self.connections.insert(peer_id, con);
-
-                if None == self.handlers.get(&peer_id) && !self.connection_requested.contains(&peer_id) {
-
-                    self.event_sender.send(NetworkBehaviourAction::Dial {
-                        opts: DialOpts::from(peer_id.clone()),
-                        handler: ProxyClientHandler::new(self.key.clone())
-                    }).await?;
-                    self.connection_requested.insert(peer_id.clone());
-                }
             }
             IncomingProxyClientEvent::CloseConnection(_) => {
                 unimplemented!()

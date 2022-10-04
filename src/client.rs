@@ -1,172 +1,142 @@
-use std::collections::{HashMap, VecDeque};
+use std::borrow::BorrowMut;
+use std::error::Error;
 use std::io;
-use std::io::Error;
 use std::net::SocketAddr;
-use std::ops::Add;
-use std::task::{Context, Poll};
-use std::time::{Duration, Instant};
-use libp2p::core::upgrade::DeniedUpgrade;
-use libp2p::core::{ProtocolName, UpgradeError, UpgradeInfo};
-use libp2p::futures::{FutureExt, Sink};
-use libp2p::swarm::{ConnectionHandler, ConnectionHandlerEvent, ConnectionHandlerUpgrErr, KeepAlive, SubstreamProtocol};
-use libp2p::swarm::handler::{InboundUpgradeSend, OutboundUpgradeSend};
-use log::{debug, error};
+use std::str::FromStr;
+use std::time::Duration;
+use async_std::task::block_on;
+use futures::StreamExt;
+use libp2p::kad::{BootstrapError, BootstrapResult, GetClosestPeersError, Kademlia, KademliaConfig, KademliaEvent, QueryResult};
+use libp2p::kad::store::MemoryStore;
+use libp2p_proxy::client::{ProxyClient, ProxyClientEvent};
+use libp2p::{development_transport, identity, NetworkBehaviour, noise, PeerId, relay, Swarm, Transport};
+use libp2p::core::transport::{OrTransport, upgrade};
+use libp2p::identify::{Identify, IdentifyConfig, IdentifyEvent};
+use libp2p::swarm::dial_opts::DialOpts;
+use libp2p::swarm::NetworkBehaviour;
+use libp2p_dns::DnsConfig;
+use libp2p_tcp::{GenTcpConfig, TcpTransport};
+use log::{debug, info};
 use ssh_key::PrivateKey;
-use async_std::net::TcpStream;
-use void::Void;
-use crate::client::ProxyOutClientEvent::{Stopped};
-use crate::protocol::{PendingConnection, ProxyClientProtocol};
+use crate::{BOOTNODES, Multiaddr, SwarmEvent};
 
-#[derive(Debug)]
-pub enum ProxyInClientEvent {
-    Connect{addr: SocketAddr, stream: TcpStream},
-    Disconnect(SocketAddr),
-    DisconnectAll,
-    Stop
+#[derive(NetworkBehaviour)]
+#[behaviour(out_event = "ClientEvent")]
+struct ClientBehaviour {
+    kadmelia: Kademlia<MemoryStore>,
+    client: ProxyClient,
+    ident: Identify,
+    relay: relay::v2::client::Client
 }
 
 #[derive(Debug)]
-pub enum ProxyOutClientEvent {
-    Connected(SocketAddr),
-    Disconnected(SocketAddr),
-    CommunicationCompleted(SocketAddr),
-    Error(SocketAddr, Error),
-    Stopped,
+enum ClientEvent {
+    Client(ProxyClientEvent),
+    Kadmelia(KademliaEvent),
+    Ident(IdentifyEvent),
+    Relay(relay::v2::client::Event)
 }
 
-pub struct ProxyClientHandler {
-    pub(crate) key: PrivateKey,
-    pending_events: VecDeque<ProxyInClientEvent>,
-    pending_out_events: VecDeque<ProxyOutClientEvent>,
-    pending_connections: HashMap<SocketAddr, PendingConnection>,
-    stopped: bool
-}
-
-fn conn_error_to_io(err: ConnectionHandlerUpgrErr<Error>) -> Error {
-    match err {
-        ConnectionHandlerUpgrErr::Timeout => io::ErrorKind::TimedOut.into(),
-        ConnectionHandlerUpgrErr::Timer => io::ErrorKind::Other.into(),
-        ConnectionHandlerUpgrErr::Upgrade(err) => {
-            match err {
-                UpgradeError::Select(err) => {
-                    err.into()
-                }
-                UpgradeError::Apply(err) => {
-                    err
-                }
-            }
-        }
+impl From<KademliaEvent> for ClientEvent {
+    fn from(e: KademliaEvent) -> Self {
+        Self::Kadmelia(e)
     }
 }
 
-impl ProxyClientHandler {
-    pub fn new(key: PrivateKey) -> Self {
-        ProxyClientHandler{
-            key,
-            pending_events: VecDeque::new(),
-            pending_connections: HashMap::new(),
-            pending_out_events: VecDeque::new(),
-            stopped: false
-        }
+impl From<ProxyClientEvent> for ClientEvent {
+    fn from(e: ProxyClientEvent) -> Self {
+        Self::Client(e)
     }
 }
 
-impl ConnectionHandler for ProxyClientHandler {
-    type InEvent = ProxyInClientEvent;
-    type OutEvent = ProxyOutClientEvent;
-    type Error = io::Error;
-    type InboundProtocol = DeniedUpgrade;
-    type OutboundProtocol = ProxyClientProtocol;
-    type InboundOpenInfo = ();
-    type OutboundOpenInfo = SocketAddr;
-
-    fn listen_protocol(&self) -> SubstreamProtocol<Self::InboundProtocol, Self::InboundOpenInfo> {
-        SubstreamProtocol::new(DeniedUpgrade{}, ())
+impl From<IdentifyEvent> for ClientEvent {
+    fn from(e: IdentifyEvent) -> Self {
+        Self::Ident(e)
     }
+}
 
-    fn inject_fully_negotiated_inbound(&mut self, _: Void, _: ()) {}
-
-    fn inject_fully_negotiated_outbound(&mut self, conn: PendingConnection, addr: SocketAddr) {
-        self.pending_connections.insert(addr, conn);
-        self.pending_out_events.push_back(ProxyOutClientEvent::Connected(addr));
+impl From<relay::v2::client::Event> for ClientEvent {
+    fn from(e: relay::v2::client::Event) -> Self {
+        Self::Relay(e)
     }
+}
 
-    fn inject_event(&mut self, event: Self::InEvent) {
-        self.pending_events.push_back(event);
-    }
+pub async fn run_client(key: PrivateKey, local_addr: SocketAddr, remote_peer: PeerId, remote_addr: SocketAddr) -> Result<(), Box<dyn Error>> {
+    let local_key = identity::Keypair::generate_ed25519();
+    let local_peer_id = PeerId::from(local_key.public());
 
-    fn inject_dial_upgrade_error(&mut self, info: Self::OutboundOpenInfo, error: ConnectionHandlerUpgrErr<<Self::OutboundProtocol as OutboundUpgradeSend>::Error>) {
-        error!("Error while connecting to server to addr {info}: {error}");
-        self.pending_out_events.push_back(ProxyOutClientEvent::Error(info, conn_error_to_io(error)));
-    }
+    let (relay_transport, client) = relay::v2::client::Client::new_transport_and_behaviour(local_peer_id);
 
-    fn connection_keep_alive(&self) -> KeepAlive {
-        KeepAlive::Yes
-    }
+    let noise_keys = noise::Keypair::<noise::X25519Spec>::new()
+        .into_authentic(&local_key)
+        .expect("Signing libp2p-noise static DH keypair failed.");
 
-    fn poll(&mut self, cx: &mut Context<'_>) -> Poll<ConnectionHandlerEvent<Self::OutboundProtocol, Self::OutboundOpenInfo, Self::OutEvent, Self::Error>> {
-        if self.stopped {
-            return Poll::Pending
+    let transport = OrTransport::new(
+        relay_transport,
+        block_on(
+            DnsConfig::system(TcpTransport::new(
+                GenTcpConfig::default().port_reuse(true),
+            )))
+            .unwrap())
+        .upgrade(upgrade::Version::V1)
+        .authenticate(
+            noise::NoiseConfig::xx(noise_keys).into_authenticated()
+        )
+        .multiplex(libp2p::yamux::YamuxConfig::default())
+        .boxed();
+
+    let mut swarm = {
+        let mut cfg = KademliaConfig::default();
+        cfg.set_query_timeout(Duration::from_secs(5 * 60));
+        let store = MemoryStore::new(local_peer_id);
+        let mut kadmelia = Kademlia::with_config(local_peer_id, store, cfg);
+
+        let mut behaviour = ClientBehaviour {
+            client: ProxyClient::new(key),
+            kadmelia,
+            relay: client,
+            ident: Identify::new(
+                IdentifyConfig::new(
+                    "/ipfs/0.1.0".into(),
+                    local_key.public(),
+                )
+            )
+        };
+
+        // Add the bootnodes to the local routing table. `libp2p-dns` built
+        // into the `transport` resolves the `dnsaddr` when Kademlia tries
+        // to dial these nodes.
+        let bootaddr = Multiaddr::from_str("/dnsaddr/bootstrap.libp2p.io")?;
+
+        for peer in &BOOTNODES {
+            behaviour.kadmelia.add_address(&PeerId::from_str(peer)?, bootaddr.clone());
         }
+        Swarm::new(transport, behaviour, local_peer_id)
+    };
 
-        while let Some(event) = self.pending_events.pop_front() {
-            match event {
-                ProxyInClientEvent::Connect { addr, stream } => {
-                    let proto = ProxyClientProtocol{
-                        private_key: self.key.clone(),
-                        socket_addr: addr,
-                        stream
-                    };
 
-                    debug!("Initing protocol {:?}, supports {:?}", proto.protocol_name(), proto.protocol_info());
+    swarm.behaviour_mut().kadmelia.get_closest_peers(remote_peer);
+    let mut dialed = false;
 
-                    return Poll::Ready(ConnectionHandlerEvent::OutboundSubstreamRequest{
-                         protocol: SubstreamProtocol::new(proto, addr)
-                    });
+    loop {
+        let event = swarm.select_next_some().await;
+        match event {
+            SwarmEvent::ConnectionEstablished {
+                peer_id,
+                endpoint,
+                ..
+            } if peer_id == remote_peer => {
+                if !dialed {
+                    info!("Found peer {remote_peer}, dealing with it");
+                    dialed = true;
+                    swarm.dial(endpoint.get_remote_address().clone())?;
                 }
-                ProxyInClientEvent::Disconnect(addr) => {
-                    let con = self.pending_connections.remove(&addr);
-                    if let Some(con) = con {
-                        drop(con);
-                        self.pending_connections.remove(&addr);
-                    }
+                if endpoint.is_dialer() {
+                    info!("Starting proxy...");
+                    swarm.behaviour_mut().client.connect(local_addr, remote_addr, remote_peer);
                 }
-                ProxyInClientEvent::DisconnectAll => {
-                    self.pending_connections.clear();
-                }
-                ProxyInClientEvent::Stop => {
-                    // Clear all connections and send stopped event
-                    self.pending_connections.clear();
-                    self.stopped = true;
-
-                    return Poll::Ready(ConnectionHandlerEvent::Custom(Stopped));
-                }
-            }
+            },
+            _ => {}
         }
-
-        if let Some(ev) = self.pending_out_events.pop_front() {
-            return Poll::Ready(ConnectionHandlerEvent::Custom(ev));
-        }
-
-        let mut to_remove = Vec::new();
-
-        for (addr, mut con) in self.pending_connections.iter_mut() {
-            if let Poll::Ready(res) = con.poll_unpin(cx) {
-                match res {
-                    Ok(res) => {}
-                    Err(err) => {
-                        error!("Error while connection {err}");
-                        self.pending_out_events.push_back(ProxyOutClientEvent::Error(addr.clone(), io::ErrorKind::Other.into()))
-                    }
-                }
-                to_remove.push(addr.clone());
-            }
-        }
-
-        for addr in to_remove {
-            self.pending_connections.remove(&addr);
-        }
-
-        Poll::Pending
     }
 }

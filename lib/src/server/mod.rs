@@ -1,12 +1,20 @@
+mod handler;
+
 use std::task::{Context, Poll};
 use libp2p::core::connection::ConnectionId;
 use libp2p::PeerId;
 use libp2p::swarm::{ConnectionHandler, IntoConnectionHandler, NetworkBehaviour, NetworkBehaviourAction, PollParameters};
 use ssh_key::PublicKey;
-use crate::server::ProxyServerHandler;
+use handler::ProxyServerHandler;
 
 pub struct ProxyServer {
     pub(crate) key: PublicKey
+}
+
+impl ProxyServer {
+    pub fn new(key: PublicKey) -> Self {
+        ProxyServer{key}
+    }
 }
 
 impl NetworkBehaviour for ProxyServer {
