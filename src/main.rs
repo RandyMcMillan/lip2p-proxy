@@ -134,7 +134,13 @@ async fn main() -> Result<(), Box<dyn Error>> {
                     key
                 };
 
-                run_client(key, local_addr, peer_id, remote_addr).await?;
+                run_client(
+                    key,
+                    local_addr.expect("REASON"),
+                    peer_id,
+                    remote_addr.expect("REASON"),
+                )
+                .await?;
             } else {
                 match get_ssh_key() {
                     Ok(key) => {
@@ -156,7 +162,13 @@ async fn main() -> Result<(), Box<dyn Error>> {
                             key
                         };
 
-                        run_client(key, local_addr, peer_id, remote_addr).await?;
+                        run_client(
+                            key,
+                            local_addr.expect("REASON"),
+                            peer_id,
+                            remote_addr.expect("REASON"),
+                        )
+                        .await?;
                     }
                     Err(e) => {
                         eprintln!("Error getting SSH key: {}", e);
