@@ -136,12 +136,13 @@ pub async fn run_client(
                 peer_id, endpoint, ..
             } if peer_id == remote_peer => {
                 if !dialed {
-                    info!("Found peer {remote_peer}, dealing with it");
+                    info!("remote_peer={remote_peer}");
                     dialed = true;
                     swarm.dial(endpoint.get_remote_address().clone())?;
                 }
                 if endpoint.is_dialer() {
                     info!("Starting proxy...");
+                    info!("endpoint.is_dialer={remote_peer}");
                     swarm
                         .behaviour_mut()
                         .client
