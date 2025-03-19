@@ -5,8 +5,10 @@ use crate::client::run_client;
 use crate::server::run_server;
 use clap::{Parser, Subcommand};
 use libp2p::futures::StreamExt;
+use libp2p::identity::ed25519::{Keypair, PublicKey as LibP2PPublicKey, SecretKey};
 use libp2p::swarm::SwarmEvent;
 use libp2p::{Multiaddr, PeerId, Swarm};
+
 use libp2p_proxy::client::ProxyClient;
 use libp2p_proxy::server::ProxyServer;
 use log::{debug, error};
@@ -78,9 +80,39 @@ fn get_ssh_pubkey() -> Result<String, Box<dyn std::error::Error>> {
     Ok(ssh_key)
 }
 
+fn create_peer_id_from_fixed_secret() -> Keypair {
+    // A fixed, known secret key (for testing purposes ONLY).
+    let seed: [u8; 32] = [
+        1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,
+        1, 1,
+    ];
+
+    use rand::{rngs::StdRng, RngCore, SeedableRng};
+
+    let mut rng = StdRng::from_seed(seed);
+    let mut bytes = vec![0u8; 32];
+    rng.fill_bytes(&mut bytes);
+
+    let secret_key =
+        libp2p::identity::ed25519::SecretKey::from_bytes(bytes.clone()).expect("Valid secret key");
+    let keypair = libp2p::identity::ed25519::Keypair::from(secret_key); //create a keypair from the secret key.
+    keypair
+}
+
 #[async_std::main]
 async fn main() -> Result<(), Box<dyn Error>> {
     pretty_env_logger::init();
+
+    let keypair = create_peer_id_from_fixed_secret();
+
+    debug!("Keypair: {:?}", keypair);
+
+    //Accessing secret and public keys from keypair.
+    let secret = keypair.secret();
+    let public = keypair.public();
+
+    debug!("Secret Key: {:?}", secret);
+    debug!("Public Key: {:?}", public);
 
     // match get_ssh_key() {
     //     Ok(key) => {
