@@ -1,22 +1,26 @@
-use std::io;
-use std::task::{Context, Poll};
+use crate::protocol::{PendingConnection, ProxyServerProtocol};
 use libp2p::core::upgrade::DeniedUpgrade;
 use libp2p::futures::FutureExt;
-use libp2p::swarm::{ConnectionHandler, ConnectionHandlerEvent, ConnectionHandlerUpgrErr, KeepAlive, SubstreamProtocol};
 use libp2p::swarm::handler::{InboundUpgradeSend, OutboundUpgradeSend};
+use libp2p::swarm::{
+    ConnectionHandler, ConnectionHandlerEvent, ConnectionHandlerUpgrErr, KeepAlive,
+    SubstreamProtocol,
+};
 use ssh_key::PublicKey;
+use std::io;
+use std::task::{Context, Poll};
 use void::Void;
-use crate::protocol::{PendingConnection, ProxyServerProtocol};
 
 pub struct ProxyServerHandler {
     key: PublicKey,
-    pending_connections: Vec<PendingConnection>
+    pending_connections: Vec<PendingConnection>,
 }
 
 impl ProxyServerHandler {
     pub fn new(key: PublicKey) -> Self {
-        ProxyServerHandler{
-            key, pending_connections: Vec::new()
+        ProxyServerHandler {
+            key,
+            pending_connections: Vec::new(),
         }
     }
 }
@@ -33,8 +37,9 @@ impl ConnectionHandler for ProxyServerHandler {
     fn listen_protocol(&self) -> SubstreamProtocol<Self::InboundProtocol, Self::InboundOpenInfo> {
         SubstreamProtocol::new(
             ProxyServerProtocol {
-                public_key: self.key.clone()
-            }, ()
+                public_key: self.key.clone(),
+            },
+            (),
         )
     }
 
@@ -52,7 +57,17 @@ impl ConnectionHandler for ProxyServerHandler {
         KeepAlive::Yes
     }
 
-    fn poll(&mut self, cx: &mut Context<'_>) -> Poll<ConnectionHandlerEvent<Self::OutboundProtocol, Self::OutboundOpenInfo, Self::OutEvent, Self::Error>> {
+    fn poll(
+        &mut self,
+        cx: &mut Context<'_>,
+    ) -> Poll<
+        ConnectionHandlerEvent<
+            Self::OutboundProtocol,
+            Self::OutboundOpenInfo,
+            Self::OutEvent,
+            Self::Error,
+        >,
+    > {
         let mut new_con = Vec::new();
 
         while let Some(mut con) = self.pending_connections.pop() {

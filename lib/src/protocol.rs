@@ -1,28 +1,30 @@
-use std::error::Error;
-use std::io;
-use std::net::{SocketAddr};
-use std::str::FromStr;
-use std::time::Duration;
+use async_std::fs;
 use async_std::future::timeout;
 use async_std::io::WriteExt;
-use dsa::signature::{Signer, Verifier};
-use libp2p::core::{ProtocolName, UpgradeInfo};
-use libp2p::{InboundUpgrade, OutboundUpgrade};
-use libp2p::futures::future::{BoxFuture};
-use libp2p::futures::{AsyncRead, AsyncReadExt, AsyncWrite, FutureExt};
-use libp2p::swarm::{NegotiatedSubstream};
-use ssh_key::{Algorithm, HashAlg, PrivateKey, PublicKey};
-use async_std::net::{TcpStream};
-use log::{debug, error, info};
+use async_std::net::TcpStream;
+use async_std::path::Path;
 use async_std::task;
 use async_std::task::JoinHandle;
+use dsa::signature::{Signer, Verifier};
+use libp2p::core::{ProtocolName, UpgradeInfo};
+use libp2p::futures::future::BoxFuture;
+use libp2p::futures::{AsyncRead, AsyncReadExt, AsyncWrite, FutureExt};
+use libp2p::swarm::NegotiatedSubstream;
+use libp2p::{InboundUpgrade, OutboundUpgrade};
+use log::{debug, error, info};
+use ssh_key::{Algorithm, HashAlg, PrivateKey, PublicKey};
+use std::error::Error;
+use std::io;
+use std::net::SocketAddr;
+use std::str::FromStr;
+use std::time::Duration;
 
 pub type PendingConnection = JoinHandle<Result<(), io::Error>>;
 
 pub struct ProxyClientProtocol {
     pub(crate) private_key: PrivateKey,
     pub(crate) socket_addr: SocketAddr,
-    pub(crate) stream: TcpStream
+    pub(crate) stream: TcpStream,
 }
 
 pub struct ProxyServerProtocol {
@@ -31,13 +33,13 @@ pub struct ProxyServerProtocol {
 
 #[derive(Debug, Copy, Clone)]
 pub enum ProxyVersion {
-    Version1 // 1.0.0
+    Version1, // 1.0.0
 }
 
 impl ProtocolName for ProxyVersion {
     fn protocol_name(&self) -> &[u8] {
         match self {
-            ProxyVersion::Version1 => b"/tricker/proxy/1.0.0"
+            ProxyVersion::Version1 => b"/tricker/proxy/1.0.0",
         }
     }
 }
@@ -45,7 +47,7 @@ impl ProtocolName for ProxyVersion {
 pub const SUPPORTED_VERSIONS: [ProxyVersion; 1] = [ProxyVersion::Version1];
 
 const OK_BYTE: &[u8] = b"\x01";
-const ERR_BYTE: &[u8] = b"\x00";  // maybe in future add more verbose errors
+const ERR_BYTE: &[u8] = b"\x00"; // maybe in future add more verbose errors
 const MAX_ADDR_LEN: usize = 1024;
 
 impl ProtocolName for ProxyClientProtocol {
@@ -65,10 +67,10 @@ impl UpgradeInfo for ProxyClientProtocol {
     type InfoIter = Vec<&'static [u8]>;
 
     fn protocol_info(&self) -> Self::InfoIter {
-        SUPPORTED_VERSIONS.iter()
+        SUPPORTED_VERSIONS
+            .iter()
             .map(|v| v.protocol_name())
             .collect()
-
     }
 }
 
@@ -77,10 +79,10 @@ impl UpgradeInfo for ProxyServerProtocol {
     type InfoIter = Vec<&'static [u8]>;
 
     fn protocol_info(&self) -> Self::InfoIter {
-        SUPPORTED_VERSIONS.iter()
+        SUPPORTED_VERSIONS
+            .iter()
             .map(|v| v.protocol_name())
             .collect()
-
     }
 }
 
@@ -91,8 +93,7 @@ impl InboundUpgrade<NegotiatedSubstream> for ProxyServerProtocol {
 
     fn upgrade_inbound(self, mut socket: NegotiatedSubstream, _: Self::Info) -> Self::Future {
         async move {
-
-            let ProxyServerProtocol {public_key, } = self;
+            let ProxyServerProtocol { public_key } = self;
 
             let res = read_address(&mut socket, public_key).await;
 
@@ -110,10 +111,9 @@ impl InboundUpgrade<NegotiatedSubstream> for ProxyServerProtocol {
             info!("Connecting inbound stream to address {addr}");
             let conn = task::spawn(connect(stream, socket));
 
-
             return Ok(conn);
-
-        }.boxed()
+        }
+        .boxed()
     }
 }
 
@@ -124,13 +124,12 @@ impl OutboundUpgrade<NegotiatedSubstream> for ProxyClientProtocol {
 
     fn upgrade_outbound(self, socket: NegotiatedSubstream, _: Self::Info) -> Self::Future {
         async move {
-
             let mut socket = socket;
 
             let ProxyClientProtocol {
                 private_key,
                 socket_addr,
-                stream
+                stream,
             } = self;
 
             write_address(&mut socket, private_key, socket_addr).await?;
@@ -142,34 +141,37 @@ impl OutboundUpgrade<NegotiatedSubstream> for ProxyClientProtocol {
             if resp.is_err() || resp.unwrap().is_err() || buf != OK_BYTE {
                 return Err(io::ErrorKind::Other.into());
             }
-            
+
             debug!("Stream connected to address {socket_addr}");
 
             let conn = task::spawn(connect(stream, socket));
             Ok(conn)
-        }.boxed()
+        }
+        .boxed()
     }
 }
 
-async fn read_u64<I> (mut stream: I) -> io::Result<u64>
-    where I: AsyncRead + Unpin {
-
+async fn read_u64<I>(mut stream: I) -> io::Result<u64>
+where
+    I: AsyncRead + Unpin,
+{
     let mut u64_buf = [0 as u8; 8];
 
     stream.read_exact(&mut u64_buf).await?;
     Ok(u64::from_le_bytes(u64_buf))
 }
 
-async fn read_len<I> (mut stream: I, len: usize) -> io::Result<Vec<u8>>
-    where I: AsyncRead + Unpin {
-
+async fn read_len<I>(mut stream: I, len: usize) -> io::Result<Vec<u8>>
+where
+    I: AsyncRead + Unpin,
+{
     let mut buf: [u8; MAX_ADDR_LEN] = [0; MAX_ADDR_LEN];
 
     if len > MAX_ADDR_LEN {
         return Err(io::ErrorKind::InvalidData.into());
     }
 
-    let read = stream.read_exact(&mut buf[0 .. len]);
+    let read = stream.read_exact(&mut buf[0..len]);
     let res = timeout(Duration::from_millis(100), read).await;
 
     if res.is_err() {
@@ -177,12 +179,13 @@ async fn read_len<I> (mut stream: I, len: usize) -> io::Result<Vec<u8>>
     }
     res.unwrap()?;
 
-    Ok(Vec::from(&buf[0 .. len]))
+    Ok(Vec::from(&buf[0..len]))
 }
 
 async fn read_address<I>(mut stream: I, key: PublicKey) -> io::Result<SocketAddr>
-    where I: AsyncRead + Unpin {
-
+where
+    I: AsyncRead + Unpin,
+{
     let addr_len = read_u64(&mut stream).await?;
     let addr_bytes = read_len(&mut stream, addr_len as usize).await?;
 
@@ -201,11 +204,11 @@ async fn read_address<I>(mut stream: I, key: PublicKey) -> io::Result<SocketAddr
         Ok(_) => {
             let res = std::str::from_utf8(&addr_bytes);
             if res.is_err() {
-                return Err(io::ErrorKind::InvalidData.into())
+                return Err(io::ErrorKind::InvalidData.into());
             }
             match SocketAddr::from_str(res.unwrap()) {
                 Ok(addr) => Ok(addr),
-                Err(_) => Err(io::ErrorKind::InvalidData.into())
+                Err(_) => Err(io::ErrorKind::InvalidData.into()),
             }
         }
         Err(err) => {
@@ -216,7 +219,8 @@ async fn read_address<I>(mut stream: I, key: PublicKey) -> io::Result<SocketAddr
 }
 
 async fn write_address<I>(mut stream: I, key: PrivateKey, addr: SocketAddr) -> io::Result<()>
-    where I: AsyncWrite + Unpin
+where
+    I: AsyncWrite + Unpin,
 {
     let addr = addr.to_string();
     let addr_bytes = addr.as_bytes();
@@ -234,7 +238,6 @@ async fn write_address<I>(mut stream: I, key: PrivateKey, addr: SocketAddr) -> i
     Ok(())
 }
 
-
 pub async fn connect<I, O>(stream1: I, stream2: O) -> io::Result<()>
 where
     I: AsyncRead + AsyncWrite + Unpin,
@@ -243,15 +246,10 @@ where
     let (mut stream_reader1, mut stream_writer1) = stream1.split();
     let (mut stream_reader2, mut stream_writer2) = stream2.split();
 
-
     // move vars to destroy them
-    let t1 = async move {
-        async_std::io::copy(&mut stream_reader1, &mut stream_writer2).await
-    };
+    let t1 = async move { async_std::io::copy(&mut stream_reader1, &mut stream_writer2).await };
 
-    let t2 = async move {
-        async_std::io::copy(&mut stream_reader2, &mut stream_writer1).await
-    };
+    let t2 = async move { async_std::io::copy(&mut stream_reader2, &mut stream_writer1).await };
 
     let (r1, r2) = futures::join!(t1, t2);
 
@@ -272,18 +270,22 @@ where
 
 #[cfg(test)]
 mod test {
-    use std::error::Error;
-    use ssh_key::{Algorithm, PrivateKey, PublicKey};
-    use crate::protocol::{ProxyClientProtocol, read_address, write_address};
-    use std::net::{SocketAddr};
-    use std::str::FromStr;
-    use futures::AsyncReadExt;
-    use async_std::stream::Stream;
-    use libp2p::futures::{AsyncRead, AsyncWrite, FutureExt};
-    use std::task::{Context, Poll};
-    use std::io::{self, Cursor, Read, Write};
-    use std::pin::Pin;
+    use crate::protocol::{read_address, write_address, ProxyClientProtocol};
+    use async_std::fs;
+    use async_std::future::timeout;
+    use async_std::io::WriteExt;
     use async_std::net::TcpStream;
+    use async_std::path::Path;
+    use async_std::stream::Stream;
+    use futures::AsyncReadExt;
+    use libp2p::futures::{AsyncRead, AsyncWrite, FutureExt};
+    use ssh_key::{Algorithm, PrivateKey, PublicKey};
+    use std::error::Error;
+    use std::io::{self, Cursor, Read, Write};
+    use std::net::SocketAddr;
+    use std::pin::Pin;
+    use std::str::FromStr;
+    use std::task::{Context, Poll};
 
     #[derive(Default, Debug)]
     pub struct MockStream {
@@ -359,20 +361,53 @@ mod test {
 
     #[async_std::test]
     async fn test_handshake() -> Result<(), Box<dyn Error>> {
-        let a = SocketAddr::from_str("127.0.0.1:80")?;
+        let a = SocketAddr::from_str("127.0.0.1:8080")?;
         let (r, w) = MockStream::from(b"").split();
 
-        let key = std::fs::read_to_string("/Users/artolord/.ssh/tricker.pub")?;
-        let key_pub = PublicKey::from_openssh(key.as_str())?;
 
-        let key = std::fs::read_to_string("/Users/artolord/.ssh/tricker")?;
-        let key_priv = PrivateKey::from_openssh(key.as_str())?;
+        // WARNING: don't actually hardcode private keys in source code!!!
+        let encoded_key = r#"
+-----BEGIN OPENSSH PRIVATE KEY-----
+b3BlbnNzaC1rZXktdjEAAAAABG5vbmUAAAAEbm9uZQAAAAAAAAABAAAAMwAAAAtzc2gtZW
+QyNTUxOQAAACCzPq7zfqLffKoBDe/eo04kH2XxtSmk9D7RQyf1xUqrYgAAAJgAIAxdACAM
+XQAAAAtzc2gtZWQyNTUxOQAAACCzPq7zfqLffKoBDe/eo04kH2XxtSmk9D7RQyf1xUqrYg
+AAAEC2BsIi0QwW2uFscKTUUXNHLsYX4FxlaSDSblbAj7WR7bM+rvN+ot98qgEN796jTiQf
+ZfG1KaT0PtFDJ/XFSqtiAAAAEHVzZXJAZXhhbXBsZS5jb20BAgMEBQ==
+-----END OPENSSH PRIVATE KEY-----
+"#;
 
-        write_address(w, key_priv, a).await?;
+        let private_key = PrivateKey::from_openssh(encoded_key)?;
 
-        let addr = read_address(r, key_pub).await?;
+        // Key attributes
+        assert_eq!(private_key.algorithm(), ssh_key::Algorithm::Ed25519);
+        assert_eq!(private_key.comment(), "user@example.com");
 
-        assert_eq!(addr, a);
+        // Key data: in this example an Ed25519 key
+        if let Some(ed25519_keypair) = private_key.key_data().ed25519() {
+            assert_eq!(
+                ed25519_keypair.public.as_ref(),
+                [
+                    0xb3, 0x3e, 0xae, 0xf3, 0x7e, 0xa2, 0xdf, 0x7c, 0xaa, 0x1, 0xd, 0xef, 0xde,
+                    0xa3, 0x4e, 0x24, 0x1f, 0x65, 0xf1, 0xb5, 0x29, 0xa4, 0xf4, 0x3e, 0xd1, 0x43,
+                    0x27, 0xf5, 0xc5, 0x4a, 0xab, 0x62
+                ]
+                .as_ref()
+            );
+            assert_eq!(
+                ed25519_keypair.private.as_ref(),
+                [
+                    0xb6, 0x6, 0xc2, 0x22, 0xd1, 0xc, 0x16, 0xda, 0xe1, 0x6c, 0x70, 0xa4, 0xd4,
+                    0x51, 0x73, 0x47, 0x2e, 0xc6, 0x17, 0xe0, 0x5c, 0x65, 0x69, 0x20, 0xd2, 0x6e,
+                    0x56, 0xc0, 0x8f, 0xb5, 0x91, 0xed
+                ]
+                .as_ref()
+            );
+
+            let public_key = ed25519_keypair.public;
+            write_address(w, private_key, a).await?;
+            let addr = read_address(r, public_key.into()).await?;
+            assert_eq!(addr, a);
+        }
 
         Ok(())
     }

@@ -1,3 +1,3 @@
 pub mod client;
-pub mod server;
 pub(crate) mod protocol;
+pub mod server;
