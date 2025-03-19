@@ -1,38 +1,41 @@
+use crate::{Multiaddr, SwarmEvent, BOOTNODES};
+use async_std::task::block_on;
+use futures::StreamExt;
+use libp2p::core::transport::{upgrade, OrTransport};
+use libp2p::dns::GenDnsConfig;
+use libp2p::gossipsub::TopicHash;
+use libp2p::gossipsub::{
+    Gossipsub, GossipsubConfig, GossipsubConfigBuilder, GossipsubEvent, MessageAuthenticity,
+};
+use libp2p::identify::{Identify, IdentifyConfig, IdentifyEvent};
+use libp2p::kad::store::MemoryStore;
+use libp2p::kad::{GetClosestPeersError, Kademlia, KademliaConfig, KademliaEvent, QueryResult};
+use libp2p::multiaddr::Protocol;
+use libp2p::ping::{Ping, PingEvent};
+use libp2p::relay::v2::HOP_PROTOCOL_NAME;
+use libp2p::swarm::dial_opts::DialOpts;
+use libp2p::swarm::AddressRecord;
+use libp2p::tcp::GenTcpConfig;
+use libp2p::{
+    autonat, development_transport, gossipsub, identity, noise, relay, NetworkBehaviour, PeerId,
+    Swarm, Transport,
+};
+use libp2p_dns::DnsConfig;
+use libp2p_proxy::client::{ProxyClient, ProxyClientEvent};
+use libp2p_proxy::server::ProxyServer;
+use libp2p_tcp::TcpTransport;
+use log::{debug, error, info};
+use ssh_key::{PrivateKey, PublicKey};
 use std::collections::{HashMap, HashSet};
 use std::error::Error;
 use std::io;
 use std::net::SocketAddr;
 use std::ops::Sub;
-use libp2p::dns::GenDnsConfig;
 use std::str::FromStr;
 use std::time::{Duration, Instant};
-use async_std::task::block_on;
-use futures::StreamExt;
-use libp2p::kad::{GetClosestPeersError, Kademlia, KademliaConfig, KademliaEvent, QueryResult};
-use libp2p::kad::store::MemoryStore;
-use libp2p_proxy::client::{ProxyClient, ProxyClientEvent};
-use libp2p::{autonat, development_transport, gossipsub, identity, NetworkBehaviour, noise, PeerId, relay, Swarm, Transport};
-use libp2p::core::transport::{OrTransport, upgrade};
-use libp2p::gossipsub::{Gossipsub, GossipsubConfig, GossipsubConfigBuilder, GossipsubEvent, MessageAuthenticity};
-use libp2p::identify::{Identify, IdentifyConfig, IdentifyEvent};
-use libp2p::multiaddr::Protocol;
-use libp2p::ping::{Ping, PingEvent};
-use libp2p::relay::v2::HOP_PROTOCOL_NAME;
-use libp2p::swarm::AddressRecord;
-use libp2p::swarm::dial_opts::DialOpts;
-use libp2p::tcp::GenTcpConfig;
-use libp2p_dns::DnsConfig;
-use libp2p_tcp::TcpTransport;
-use log::{debug, error, info};
-use ssh_key::{PrivateKey, PublicKey};
-use libp2p_proxy::server::ProxyServer;
-use crate::{BOOTNODES, SwarmEvent, Multiaddr};
-use libp2p::gossipsub::TopicHash;
-
 
 const MAX_RELAYS: usize = 5;
 const MAX_PEERS: usize = 25;
-
 
 #[derive(NetworkBehaviour)]
 #[behaviour(out_event = "ServerEvent")]
@@ -97,7 +100,8 @@ pub async fn run_server(key: PublicKey) -> Result<(), Box<dyn Error>> {
 
     info!("Peer id is {local_peer_id}");
 
-    let (relay_transport, client) = relay::v2::client::Client::new_transport_and_behaviour(local_peer_id);
+    let (relay_transport, client) =
+        relay::v2::client::Client::new_transport_and_behaviour(local_peer_id);
 
     let noise_keys = noise::Keypair::<noise::X25519Spec>::new()
         .into_authentic(&local_key)
@@ -105,17 +109,15 @@ pub async fn run_server(key: PublicKey) -> Result<(), Box<dyn Error>> {
 
     let transport = OrTransport::new(
         relay_transport,
-        block_on(
-            DnsConfig::system(TcpTransport::new(
-                GenTcpConfig::default().port_reuse(true),
-            )))
-            .unwrap())
-        .upgrade(upgrade::Version::V1)
-        .authenticate(
-            noise::NoiseConfig::xx(noise_keys).into_authenticated()
-        )
-        .multiplex(libp2p::yamux::YamuxConfig::default())
-        .boxed();
+        block_on(DnsConfig::system(TcpTransport::new(
+            GenTcpConfig::default().port_reuse(true),
+        )))
+        .unwrap(),
+    )
+    .upgrade(upgrade::Version::V1)
+    .authenticate(noise::NoiseConfig::xx(noise_keys).into_authenticated())
+    .multiplex(libp2p::yamux::YamuxConfig::default())
+    .boxed();
 
     let mut swarm = {
         let mut cfg = KademliaConfig::default();
@@ -126,12 +128,10 @@ pub async fn run_server(key: PublicKey) -> Result<(), Box<dyn Error>> {
         let mut behaviour = ServerBehaviour {
             server: ProxyServer::new(key),
             kadmelia,
-            identify: Identify::new(
-                IdentifyConfig::new(
-                    "/ipfs/0.1.0".into(),
-                    local_key.public(),
-                )
-            ),
+            identify: Identify::new(IdentifyConfig::new(
+                "/ipfs/0.1.0".into(),
+                local_key.public(),
+            )),
             ping: Ping::default(),
             auto_nat: autonat::Behaviour::new(
                 local_peer_id,
@@ -143,13 +143,15 @@ pub async fn run_server(key: PublicKey) -> Result<(), Box<dyn Error>> {
                     ..Default::default()
                 },
             ),
-            relay: client
+            relay: client,
         };
 
         let bootaddr = Multiaddr::from_str("/dnsaddr/bootstrap.libp2p.io")?;
 
         for peer in &BOOTNODES {
-            behaviour.kadmelia.add_address(&PeerId::from_str(peer)?, bootaddr.clone());
+            behaviour
+                .kadmelia
+                .add_address(&PeerId::from_str(peer)?, bootaddr.clone());
         }
 
         Swarm::new(transport, behaviour, local_peer_id)
@@ -160,24 +162,35 @@ pub async fn run_server(key: PublicKey) -> Result<(), Box<dyn Error>> {
     let mut pending_relay_listeners = HashSet::new();
 
     loop {
-
         let event = swarm.select_next_some().await;
         match event {
             SwarmEvent::Behaviour(e) => {
                 match e {
-
-                    ServerEvent::Relay(relay::v2::client::Event::ReservationReqAccepted {relay_peer_id, ..}) => {
+                    ServerEvent::Relay(relay::v2::client::Event::ReservationReqAccepted {
+                        relay_peer_id,
+                        ..
+                    }) => {
                         info!("Reserved address on relay {:#?}", relay_peer_id);
-                    },
+                    }
 
-                    ServerEvent::Relay(relay::v2::client::Event::ReservationReqFailed {relay_peer_id, error, ..}) => {
-                        info!("Failed to reserve address on relay {:#?}: {:#?}", relay_peer_id, error);
-                    },
+                    ServerEvent::Relay(relay::v2::client::Event::ReservationReqFailed {
+                        relay_peer_id,
+                        error,
+                        ..
+                    }) => {
+                        info!(
+                            "Failed to reserve address on relay {:#?}: {:#?}",
+                            relay_peer_id, error
+                        );
+                    }
 
-                    ServerEvent::Identify(IdentifyEvent::Received {peer_id, info}) => {
+                    ServerEvent::Identify(IdentifyEvent::Received { peer_id, info }) => {
                         if relays_map.len() < MAX_RELAYS
                             && pending_relay_listeners.len() < MAX_RELAYS
-                            && info.protocols.contains(&String::from_utf8_lossy(HOP_PROTOCOL_NAME).to_string()) {
+                            && info
+                                .protocols
+                                .contains(&String::from_utf8_lossy(HOP_PROTOCOL_NAME).to_string())
+                        {
                             info!("Trying to set peer {peer_id} as relay");
                             let addr = Multiaddr::empty()
                                 .with(Protocol::Memory(40))
@@ -194,18 +207,25 @@ pub async fn run_server(key: PublicKey) -> Result<(), Box<dyn Error>> {
                         if info.protocols.contains(&"/rendezvous/1.0.0".to_string()) {
                             info!("Found rendezvous point {peer_id}");
                         }
-                    },
+                    }
                     _ => {}
                 };
-            },
+            }
 
-            SwarmEvent::NewListenAddr { listener_id, address } => {
-                info!("Listening on {address}");
+            SwarmEvent::NewListenAddr {
+                listener_id,
+                address,
+            } => {
+                println!("Listening on {address}");
                 pending_relay_listeners.remove(&listener_id);
                 relays_map.insert(listener_id, address);
             }
 
-            SwarmEvent::ListenerClosed {listener_id, addresses, ..} => {
+            SwarmEvent::ListenerClosed {
+                listener_id,
+                addresses,
+                ..
+            } => {
                 info!("Stopping listening on {:?}", addresses);
                 relays_map.remove(&listener_id);
             }
