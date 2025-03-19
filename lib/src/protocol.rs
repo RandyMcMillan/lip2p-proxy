@@ -39,7 +39,7 @@ pub enum ProxyVersion {
 impl ProtocolName for ProxyVersion {
     fn protocol_name(&self) -> &[u8] {
         match self {
-            ProxyVersion::Version1 => b"/tricker/proxy/1.0.0",
+            ProxyVersion::Version1 => b"/gnostr/proxy/1.0.0",
         }
     }
 }

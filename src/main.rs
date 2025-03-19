@@ -28,7 +28,9 @@ const BOOTNODES: [&str; 4] = [
     "QmcZf59bWwK5XFi76CZX8cbJ4BhTzzA3gU1ZjYZcYW3dwt",
 ];
 
-const RANDEVOUZE_NAMESPACE: &str = "tricker/proxy";
+const RANDEVOUZE_NAMESPACE: &str = "gnostr/proxy";
+
+const DETERMINISTIC_BYTES: [u8; 32] = [0u8; 32];
 
 #[derive(Parser)]
 #[command(author, version, about, long_about = None)]
