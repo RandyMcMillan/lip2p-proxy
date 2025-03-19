@@ -51,10 +51,12 @@ enum Commands {
     /// Start proxy client
     Client {
         /// Address to start proxy
-        local_addr: SocketAddr,
+        #[arg(long, value_name = "LOCAL_ADDR", default_value = "0.0.0.0:0")]
+        local_addr: Option<SocketAddr>,
 
         /// Address to connect from the server
-        remote_addr: SocketAddr,
+        #[arg(long, value_name = "REMOTE_ADDR", default_value = "0.0.0.0:0")]
+        remote_addr: Option<SocketAddr>,
 
         /// Server peer to connect
         peer_id: PeerId,
