@@ -34,8 +34,8 @@ const RANDEVOUZE_NAMESPACE: &str = "tricker/proxy";
 #[command(author, version, about, long_about = None)]
 struct Cli {
     /// Ssh key to run proxy with. .pub for server and private for client
-    #[arg(short, long, value_name = "FILE")]
-    key: PathBuf,
+    #[arg(short, long, value_name = "FILE", default_value = "~/.ssh/id_rsa")]
+    key: Option<PathBuf>,
 
     #[command(subcommand)]
     command: Commands,
@@ -66,6 +66,13 @@ fn get_ssh_key() -> Result<String, Box<dyn std::error::Error>> {
     let ssh_key = fs::read_to_string(ssh_key_path)?;
     Ok(ssh_key)
 }
+fn get_ssh_pubkey() -> Result<String, Box<dyn std::error::Error>> {
+    let home_dir = std::env::var("HOME")?;
+    let ssh_key_path = Path::new(&home_dir).join(".ssh").join("id_rsa.pub");
+
+    let ssh_key = fs::read_to_string(ssh_key_path)?;
+    Ok(ssh_key)
+}
 
 #[async_std::main]
 async fn main() -> Result<(), Box<dyn Error>> {
@@ -84,13 +91,15 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
     match cli.command {
         Commands::Server => {
-            if cli.key.exists() {
-                let key_path: PathBuf = cli.key;
+            if cli.key.clone().expect("cli.key.exists()").exists() {
+                let key_path: PathBuf = cli.key.clone().expect("REASON");
                 let key = read_to_string(key_path)?;
+                println!("{:?}", key);
                 let key = PublicKey::from_openssh(key.as_str())?;
+                println!("{:?}", key);
                 run_server(key).await?;
             } else {
-                match get_ssh_key() {
+                match get_ssh_pubkey() {
                     Ok(key) => {
                         println!("{}", key);
                         let key = PublicKey::from_openssh(key.as_str())?;
@@ -107,25 +116,53 @@ async fn main() -> Result<(), Box<dyn Error>> {
             remote_addr,
             peer_id,
         } => {
-            let key_path: PathBuf = cli.key;
-            let key = read_to_string(key_path)?;
-            let key = PrivateKey::from_openssh(key.as_str())?;
+            if cli.key.clone().expect("cli.key.exists()").exists() {
+                let key_path: PathBuf = cli.key.expect("");
+                let key = read_to_string(key_path)?;
+                let key = PrivateKey::from_openssh(key.as_str())?;
+                let key = if key.is_encrypted() {
+                    let mut str = String::new();
+                    print!("passphrase: ");
+                    io::stdout().flush()?;
+                    io::stdin().read_line(&mut str)?;
+                    let res = key.decrypt(str);
+                    if let Err(err) = res {
+                        error!("Cannot decrypt key: {err}");
+                    }
+                    res?
+                } else {
+                    key
+                };
 
-            let key = if key.is_encrypted() {
-                let mut str = String::new();
-                print!("passphrase: ");
-                io::stdout().flush()?;
-                io::stdin().read_line(&mut str)?;
-                let res = key.decrypt(str);
-                if let Err(err) = res {
-                    error!("Cannot decrypt key: {err}");
-                }
-                res?
+                run_client(key, local_addr, peer_id, remote_addr).await?;
             } else {
-                key
-            };
+                match get_ssh_key() {
+                    Ok(key) => {
+                        //println!("{}", key);
 
-            run_client(key, local_addr, peer_id, remote_addr).await?;
+                        let key = PrivateKey::from_openssh(key.as_str())?;
+
+                        let key = if key.is_encrypted() {
+                            let mut str = String::new();
+                            print!("passphrase: ");
+                            io::stdout().flush()?;
+                            io::stdin().read_line(&mut str)?;
+                            let res = key.decrypt(str);
+                            if let Err(err) = res {
+                                error!("Cannot decrypt key: {err}");
+                            }
+                            res?
+                        } else {
+                            key
+                        };
+
+                        run_client(key, local_addr, peer_id, remote_addr).await?;
+                    }
+                    Err(e) => {
+                        eprintln!("Error getting SSH key: {}", e);
+                    }
+                }
+            }
         }
     }
     Ok(())
