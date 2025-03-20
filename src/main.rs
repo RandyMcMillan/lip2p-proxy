@@ -132,6 +132,8 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
     let mut terminal = init_terminal()?;
     let restore_term = restore_terminal()?;
+    let mut app = App::default();
+
     let keypair = create_peer_id_from_fixed_secret();
 
     debug!("Keypair: {:?}", keypair);
@@ -250,3 +252,4 @@ impl Default for App {
         App {}
     }
 }
+impl App {}
