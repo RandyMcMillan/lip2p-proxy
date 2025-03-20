@@ -11,7 +11,7 @@ use libp2p::{Multiaddr, PeerId, Swarm};
 
 use libp2p_proxy::client::ProxyClient;
 use libp2p_proxy::server::ProxyServer;
-use log::{debug, error};
+use log::{debug, error, info};
 use rand::SeedableRng;
 use ssh_key::private::{KeypairData, RsaKeypair, RsaPrivateKey};
 use ssh_key::public::{Ed25519PublicKey, RsaPublicKey};
@@ -130,14 +130,14 @@ async fn main() -> Result<(), Box<dyn Error>> {
             if cli.key.clone().expect("cli.key.exists()").exists() {
                 let key_path: PathBuf = cli.key.clone().expect("REASON");
                 let key = read_to_string(key_path)?;
-                println!("{:?}", key);
-                let key = PublicKey::from_openssh(key.as_str())?;
-                println!("{:?}", key);
-                run_server(key).await?;
+                // !!!! println!("{:?}", key);
+                let pubkey = PublicKey::from_openssh(key.as_str())?;
+                info!("{:?}", pubkey);
+                run_server(pubkey).await?;
             } else {
                 match get_ssh_pubkey() {
                     Ok(key) => {
-                        println!("{}", key);
+                        info!("{}", key);
                         let key = PublicKey::from_openssh(key.as_str())?;
                         run_server(key).await?;
                     }
