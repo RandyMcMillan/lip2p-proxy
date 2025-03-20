@@ -4,6 +4,7 @@ mod server;
 use crate::client::run_client;
 use crate::server::run_server;
 use clap::{Parser, Subcommand};
+use git2::Repository;
 use libp2p::futures::StreamExt;
 use libp2p::identity::ed25519::{Keypair, PublicKey as LibP2PPublicKey, SecretKey};
 use libp2p::swarm::SwarmEvent;
@@ -126,6 +127,10 @@ fn restore_terminal() -> io::Result<()> {
     execute!(stdout(), LeaveAlternateScreen,)
 }
 
+pub fn get_repo() -> Result<Repository, Box<dyn Error>> {
+    Ok(Repository::discover(".")?)
+}
+
 #[async_std::main]
 async fn main() -> Result<(), Box<dyn Error>> {
     pretty_env_logger::init();
@@ -133,6 +138,18 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let mut terminal = init_terminal()?;
     let restore_term = restore_terminal()?;
     let mut app = App::default();
+
+    let repo = get_repo()?;
+    let head = repo.head()?;
+    info!("HEAD: {}", head.name().unwrap_or("HEAD"));
+    let commit = head.peel_to_commit()?;
+    info!("Commit ID: {}", commit.id());
+    info!("Commit Summary: {:?}", commit.summary());
+
+    info!(
+        "Commit message: {}",
+        commit.message().unwrap_or("No message")
+    );
 
     let keypair = create_peer_id_from_fixed_secret();
 
