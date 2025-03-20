@@ -12,7 +12,7 @@ use libp2p::{Multiaddr, PeerId, Swarm};
 
 use libp2p_proxy::client::ProxyClient;
 use libp2p_proxy::server::ProxyServer;
-use log::{debug, error, info};
+use log::{debug, error, info, trace};
 use rand::SeedableRng;
 use ssh_key::private::{KeypairData, RsaKeypair, RsaPrivateKey};
 use ssh_key::public::{Ed25519PublicKey, RsaPublicKey};
@@ -131,6 +131,10 @@ pub fn get_repo() -> Result<Repository, Box<dyn Error>> {
     Ok(Repository::discover(".")?)
 }
 
+fn collect_chars_to_string(chars: &[char]) -> String {
+    chars.iter().collect()
+}
+
 #[async_std::main]
 async fn main() -> Result<(), Box<dyn Error>> {
     pretty_env_logger::init();
@@ -145,11 +149,26 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let commit = head.peel_to_commit()?;
     info!("Commit ID: {}", commit.id());
     info!("Commit Summary: {:?}", commit.summary());
-
-    info!(
+    debug!(
         "Commit message: {}",
         commit.message().unwrap_or("No message")
     );
+
+    let mut char_vec: Vec<char> = Vec::new();
+	let mut line_count = 1;
+    for line in commit.message().unwrap_or("HEAD").chars() {
+        char_vec.push(line);
+		trace!("LINE:{} {}", line_count, line);
+		line_count += 1;
+    }
+
+    let commit_message = collect_chars_to_string(&char_vec);
+	let mut line_count = 1;
+	for line in commit_message.split('\n') {
+        info!("LINE:{:<03} {}", line_count, line);
+		line_count += 1;
+    }
+    trace!("commit_message:\n\n{}\n\n", commit_message);
 
     let keypair = create_peer_id_from_fixed_secret();
 
