@@ -148,7 +148,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
     info!("HEAD: {}", head.name().unwrap_or("HEAD"));
     let commit = head.peel_to_commit()?;
     info!("Commit ID: {}", commit.id());
-    info!("Commit Summary: {:?}", commit.summary());
+    info!("Commit Summary: {:?}", commit.summary().expect(""));
     debug!(
         "Commit message: {}",
         commit.message().unwrap_or("No message")
