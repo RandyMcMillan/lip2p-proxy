@@ -18,10 +18,26 @@ use ssh_key::public::{Ed25519PublicKey, RsaPublicKey};
 use ssh_key::{Algorithm, PrivateKey, PublicKey};
 use std::error::Error;
 use std::fs::read_to_string;
+use std::io::stdout;
+use std::io::Stdout;
 use std::io::Write;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::{env, fs, io};
+
+use ratatui::prelude::Constraint::Length;
+use ratatui::{
+    crossterm::{
+        event::{self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode},
+        execute,
+        terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
+    },
+    layout::{Constraint, Direction, Layout},
+    prelude::{Backend, Buffer, CrosstermBackend, Rect, StatefulWidget, Terminal, Widget},
+    style::{Color, Style},
+    text::Line,
+    widgets::{Block, Borders, List, ListItem, Paragraph, Wrap},
+};
 
 const BOOTNODES: [&str; 4] = [
     "QmNnooDu7bfjPFoTZYxMNLWUQJyrVwtbZg5gBMjTezGAJN",
@@ -99,10 +115,23 @@ fn create_peer_id_from_fixed_secret() -> Keypair {
     keypair
 }
 
+fn init_terminal() -> io::Result<Terminal<CrosstermBackend<Stdout>>> {
+    enable_raw_mode()?;
+    execute!(stdout(), EnterAlternateScreen)?;
+    Terminal::new(CrosstermBackend::new(stdout()))
+}
+
+fn restore_terminal() -> io::Result<()> {
+    disable_raw_mode()?;
+    execute!(stdout(), LeaveAlternateScreen,)
+}
+
 #[async_std::main]
 async fn main() -> Result<(), Box<dyn Error>> {
     pretty_env_logger::init();
 
+    let mut terminal = init_terminal()?;
+    let restore_term = restore_terminal()?;
     let keypair = create_peer_id_from_fixed_secret();
 
     debug!("Keypair: {:?}", keypair);
@@ -214,4 +243,10 @@ async fn main() -> Result<(), Box<dyn Error>> {
         }
     }
     Ok(())
+}
+pub struct App {}
+impl Default for App {
+    fn default() -> Self {
+        App {}
+    }
 }
