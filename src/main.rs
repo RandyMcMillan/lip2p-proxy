@@ -26,6 +26,10 @@ use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::{env, fs, io};
 
+use async_std::task;
+use hex;
+use sha2::{Digest, Sha256};
+
 use ratatui::prelude::Constraint::Length;
 use ratatui::{
     crossterm::{
@@ -135,9 +139,22 @@ fn collect_chars_to_string(chars: &[char]) -> String {
     chars.iter().collect()
 }
 
+async fn async_sha256(data: &[u8]) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(data);
+    let result = hasher.finalize();
+    hex::encode(result)
+}
+
 #[async_std::main]
 async fn main() -> Result<(), Box<dyn Error>> {
     pretty_env_logger::init();
+
+    task::block_on(async {
+        let data = b"async-std hash example";
+        let hash = async_sha256(data).await;
+        println!("SHA256 hash: {}", hash);
+    });
 
     let mut terminal = init_terminal()?;
     let restore_term = restore_terminal()?;
@@ -155,18 +172,18 @@ async fn main() -> Result<(), Box<dyn Error>> {
     );
 
     let mut char_vec: Vec<char> = Vec::new();
-	let mut line_count = 1;
+    let mut line_count = 1;
     for line in commit.message().unwrap_or("HEAD").chars() {
         char_vec.push(line);
-		trace!("LINE:{} {}", line_count, line);
-		line_count += 1;
+        trace!("LINE:{} {}", line_count, line);
+        line_count += 1;
     }
 
     let commit_message = collect_chars_to_string(&char_vec);
-	let mut line_count = 1;
-	for line in commit_message.split('\n') {
+    let mut line_count = 1;
+    for line in commit_message.split('\n') {
         info!("LINE:{:<03} {}", line_count, line);
-		line_count += 1;
+        line_count += 1;
     }
     trace!("commit_message:\n\n{}\n\n", commit_message);
 
