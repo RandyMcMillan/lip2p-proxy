@@ -10,7 +10,7 @@ async-trait = "0.1.57"
 clap = { version = "4.0.4", features = ["derive"] }
 dsa = "0.4.0"
 futures = "0.3.24"
-libp2p = { version = "0.48.0", features = ["tcp-tokio", "mdns-tokio", "dns-async-std"] }
+libp2p = { version = "0.48.0", features = ["tcp-tokio", "mdns-tokio", "dns-async-std", "gossipsub", "noise", "yamux"] }
 libp2p-dns = "0.36.0"
 libp2p-proxy = { path = "./lib" }
 libp2p-tcp = "0.36.0"
