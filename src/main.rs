@@ -145,16 +145,22 @@ async fn async_sha256(data: &[u8]) -> String {
     let result = hasher.finalize();
     hex::encode(result)
 }
+async fn async_string_sha256(data: &str) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(data);
+    let result = hasher.finalize();
+    hex::encode(result)
+}
 
 #[async_std::main]
 async fn main() -> Result<(), Box<dyn Error>> {
     pretty_env_logger::init();
 
-    task::block_on(async {
-        let data = b"async-std hash example";
-        let hash = async_sha256(data).await;
-        println!("SHA256 hash: {}", hash);
-    });
+    //task::block_on(async {
+    //    let data = b"async-std hash example";
+    //    let hash = async_sha256(data).await;
+    //    println!("SHA256 hash: {}", hash);
+    //});
 
     let mut terminal = init_terminal()?;
     let restore_term = restore_terminal()?;
@@ -182,7 +188,8 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let commit_message = collect_chars_to_string(&char_vec);
     let mut line_count = 1;
     for line in commit_message.split('\n') {
-        info!("LINE:{:<03} {}", line_count, line);
+        let line_sha256 = async_string_sha256(line);
+        info!("LINE:{:<03} {} {}", line_count, line, line_sha256.await);
         line_count += 1;
     }
     trace!("commit_message:\n\n{}\n\n", commit_message);
